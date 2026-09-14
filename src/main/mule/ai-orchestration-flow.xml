@@ -3,6 +3,7 @@
       xmlns:http="http://www.mulesoft.org/schema/mule/http"
       xmlns:os="http://www.mulesoft.org/schema/mule/os"
       xmlns:vizarce="http://www.mulesoft.org/schema/mule/vizarce"
+      xmlns:salesforce="http://www.mulesoft.org/schema/mule/salesforce"
       xmlns:ee="http://www.mulesoft.org/schema/mule/ee/core"
       xmlns:doc="http://www.mulesoft.org/schema/mule/documentation"
       xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
@@ -11,15 +12,15 @@
         http://www.mulesoft.org/schema/mule/http http://www.mulesoft.org/schema/mule/http/current/mule-http.xsd
         http://www.mulesoft.org/schema/mule/os http://www.mulesoft.org/schema/mule/os/current/mule-os.xsd
         http://www.mulesoft.org/schema/mule/vizarce http://www.mulesoft.org/schema/mule/vizarce/current/mule-vizarce.xsd
+        http://www.mulesoft.org/schema/mule/salesforce http://www.mulesoft.org/schema/mule/salesforce/current/mule-salesforce.xsd
         http://www.mulesoft.org/schema/mule/ee/core http://www.mulesoft.org/schema/mule/ee/core/current/mule-ee.xsd">
 
     <!-- ================================================================================
          MAIN FLOW
          POST /orchestrate — accepts a song request, orchestrates VIZARCE's AI generation
-         behind a Circuit Breaker, and produces a Salesforce-Custom-Object-shaped payload
-         ready to hand to a real salesforce:create operation (not wired up here — no
-         Salesforce credentials available in this environment; see the comment near the
-         end of this flow for exactly where that operation would plug in).
+         behind a Circuit Breaker, reshapes the result into a Salesforce-Custom-Object-shaped
+         payload, and creates a VIZARCE_Song_Request__c record via salesforce:create
+         (Basic Authentication — see README "Salesforce Integration" section).
          ================================================================================ -->
     <flow name="ai-orchestration-main">
         <http:listener config-ref="httpListenerConfig" path="/orchestrate" allowedMethods="POST">
@@ -98,21 +99,16 @@ output application/java
                                 this flow readable as a first version.
                             -->
                             <until-successful maxRetries="3" millisBetweenRetries="2000">
-                                <vizarce:compose-song config-ref="Vizarce_Config"
-                                                       concept="#[vars.concept]"
-                                                       genreTag="#[vars.genreTag]"
-                                                       bpm="#[vars.bpm]"
-                                                       musicalKey="#[vars.musicalKey]"
-                                                       timeoutSeconds="300" />
-                            </until-successful>
+								<vizarce:compose-song doc:id="b8e80962-e7de-4261-8716-8d9f3efe234a" doc:name="Compose" config-ref="Vizarce_Config" concept="#[vars.concept]" genreTag="#[vars.genreTag]" bpm="#[vars.bpm]" musicalKey="#[vars.musicalKey]"/>
+                            
+</until-successful>
                         </route>
                         <route>
                             <choice>
                                 <when expression="#[vars.artistName != null]">
-                                    <vizarce:build-artist-dna config-ref="Vizarce_Config"
-                                                                 artistName="#[vars.artistName]"
-                                                                 timeoutSeconds="30" />
-                                </when>
+									<vizarce:build-artist-dna doc:id="2f44f58f-42df-45e1-af26-f18ef1ffe53e" doc:name="Artist DNA" config-ref="Vizarce_Config" artistName="#[vars.artistName]"/>
+                                
+</when>
                                 <otherwise>
                                     <!--
                                         No artist reference given — this route still needs to
@@ -163,19 +159,45 @@ output application/java
                     <logger level="INFO" message="#[payload]" doc:name="Log the enterprise-shaped payload" />
 
                     <!--
-                        Where a real integration would continue:
-                        <salesforce:create config-ref="Salesforce_Config" type="VIZARCE_Song_Request__c">
-                            <salesforce:records>#[[payload.VIZARCE_Song_Request__c]]</salesforce:records>
-                        </salesforce:create>
-                        Not wired up — no Salesforce credentials available in this environment.
-                        The payload above is already shaped exactly for that operation's input.
+                        The call replaces `payload` with its own BulkOperationResult, so
+                        the enterprise-shaped payload built above is captured to a variable
+                        first and merged back in afterward.
                     -->
+                    <set-variable variableName="enterprisePayload" value="#[payload]" />
 
+                    <salesforce:create config-ref="Salesforce_Config"
+                                        type="VIZARCE_Song_Request__c"
+                                        doc:name="Create VIZARCE_Song_Request__c record">
+                        <salesforce:records>#[[payload.VIZARCE_Song_Request__c]]</salesforce:records>
+                    </salesforce:create>
+
+                    <ee:transform doc:name="Merge Salesforce create result into response">
+                        <ee:message>
+                            <ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+vars.enterprisePayload ++ {
+    salesforceRecordId: payload.items[0].id,
+    salesforceSuccess: payload.items[0].successful
+}]]></ee:set-payload>
+                        </ee:message>
+                    </ee:transform>
+
+                    <!--
+                        type="ANY" already catches VIZARCE:* and SALESFORCE:* errors alike
+                        (e.g. SALESFORCE:CONNECTIVITY on bad Basic Auth credentials,
+                        SALESFORCE:INVALID_INPUT on a malformed record) with the same
+                        graceful handling — record circuit-breaker failure, structured
+                        error response, no raw 500. ("SALESFORCE:INVALID_CREDENTIALS" is
+                        not a real error type this connector throws; confirmed against its
+                        compiled error-type provider — bad credentials surface as
+                        SALESFORCE:CONNECTIVITY instead.)
+                    -->
                     <error-handler>
                         <on-error-continue type="ANY">
                             <flow-ref name="record-circuit-failure" />
                             <logger level="ERROR"
-                                    message="#['VIZARCE orchestration failed: ' ++ (error.description default error.detailedDescription default 'unknown error')]" />
+                                    message="#['Orchestration failed (' ++ (error.errorType.identifier default 'UNKNOWN') ++ '): ' ++ (error.description default error.detailedDescription default 'unknown error')]" />
                             <ee:transform doc:name="Error response">
                                 <ee:message>
                                     <ee:set-payload><![CDATA[%dw 2.0
@@ -184,7 +206,7 @@ output application/json
 {
     status: "FAILED",
     errorType: (error.errorType.identifier default "UNKNOWN"),
-    message: (error.description default "VIZARCE orchestration failed.")
+    message: (error.description default "VIZARCE/Salesforce orchestration failed.")
 }]]></ee:set-payload>
                                 </ee:message>
                                 <ee:variables>
@@ -268,5 +290,104 @@ output application/java
             </when>
         </choice>
     </sub-flow>
+
+    <!-- ================================================================================
+         DEMO FLOWS — one VIZARCE operation each, called directly with no
+         Scatter-Gather/Circuit Breaker wrapping, for easy manual testing.
+         ================================================================================ -->
+
+    <flow name="demo-generate-lyrics">
+        <http:listener config-ref="httpListenerConfig" path="/demo/generate-lyrics" allowedMethods="POST" />
+
+        <ee:transform doc:name="Parse request into flow variables">
+            <ee:variables>
+                <ee:set-variable variableName="concept"><![CDATA[%dw 2.0
+output application/java
+---
+payload.concept]]></ee:set-variable>
+                <ee:set-variable variableName="genreTag"><![CDATA[%dw 2.0
+output application/java
+---
+payload.genreTag]]></ee:set-variable>
+            </ee:variables>
+        </ee:transform>
+
+        <vizarce:generate-lyrics doc:id="ca2085c9-501d-4dde-ae11-f4fd75541413" doc:name="Generate Lyrics" config-ref="Vizarce_Config" concept="#[vars.concept]" genreTag="#[vars.genreTag]"/>
+		<ee:transform doc:name="Return raw VIZARCE result">
+            <ee:message>
+                <ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+payload]]></ee:set-payload>
+            </ee:message>
+        </ee:transform>
+
+        <error-handler>
+            <on-error-continue type="ANY">
+                <ee:transform doc:name="Error response">
+                    <ee:message>
+                        <ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+{
+    status: "FAILED",
+    errorType: (error.errorType.identifier default "UNKNOWN"),
+    message: (error.description default "generateLyrics failed.")
+}]]></ee:set-payload>
+                    </ee:message>
+                </ee:transform>
+            </on-error-continue>
+        </error-handler>
+    </flow>
+
+    <flow name="demo-generate-structure">
+        <http:listener config-ref="httpListenerConfig" path="/demo/generate-structure" allowedMethods="POST" />
+
+        <ee:transform doc:name="Parse request into flow variables">
+            <ee:variables>
+                <ee:set-variable variableName="concept"><![CDATA[%dw 2.0
+output application/java
+---
+payload.concept]]></ee:set-variable>
+            </ee:variables>
+        </ee:transform>
+
+        <!--
+            VIZARCE keeps the full ~56-entry valid section-name taxonomy as the
+            frontend's single source of truth (not duplicated server-side) — a real
+            integration would fetch/maintain that list itself. For this isolated demo,
+            a representative subset covering the common structural roles is hardcoded
+            inline.
+        -->
+        <set-variable variableName="validSectionNames"
+                       value='#[["Intro", "Verse 1", "Pre-Chorus 1", "Chorus 1", "Verse 2", "Pre-Chorus 2", "Chorus 2", "Bridge", "Chorus Finale", "Outro", "Build-up", "Drop", "Hook", "Break", "Instrumental"]]' />
+
+        <vizarce:generate-structure doc:id="8e5e3a5e-8066-468a-848b-919ad42d5e08" doc:name="Generate Structure" config-ref="Vizarce_Config" concept="#[vars.concept]" validSectionNames="#[vars.validSectionNames]"/>
+		<ee:transform doc:name="Return raw VIZARCE result">
+            <ee:message>
+                <ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+payload]]></ee:set-payload>
+            </ee:message>
+        </ee:transform>
+
+        <error-handler>
+            <on-error-continue type="ANY">
+                <ee:transform doc:name="Error response">
+                    <ee:message>
+                        <ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+{
+    status: "FAILED",
+    errorType: (error.errorType.identifier default "UNKNOWN"),
+    message: (error.description default "generateStructure failed.")
+}]]></ee:set-payload>
+                    </ee:message>
+                </ee:transform>
+            </on-error-continue>
+        </error-handler>
+    </flow>
 
 </mule>

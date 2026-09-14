@@ -3,12 +3,14 @@
       xmlns:http="http://www.mulesoft.org/schema/mule/http"
       xmlns:os="http://www.mulesoft.org/schema/mule/os"
       xmlns:vizarce="http://www.mulesoft.org/schema/mule/vizarce"
+      xmlns:salesforce="http://www.mulesoft.org/schema/mule/salesforce"
       xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
       xsi:schemaLocation="
         http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
         http://www.mulesoft.org/schema/mule/http http://www.mulesoft.org/schema/mule/http/current/mule-http.xsd
         http://www.mulesoft.org/schema/mule/os http://www.mulesoft.org/schema/mule/os/current/mule-os.xsd
-        http://www.mulesoft.org/schema/mule/vizarce http://www.mulesoft.org/schema/mule/vizarce/current/mule-vizarce.xsd">
+        http://www.mulesoft.org/schema/mule/vizarce http://www.mulesoft.org/schema/mule/vizarce/current/mule-vizarce.xsd
+        http://www.mulesoft.org/schema/mule/salesforce http://www.mulesoft.org/schema/mule/salesforce/current/mule-salesforce.xsd">
 
     <!--
         API key is read from a system property (-M-Dvizarce.api.key=... at runtime, or via
@@ -35,5 +37,16 @@
     <vizarce:config name="Vizarce_Config">
         <vizarce:connection apiKey="${vizarce.api.key}" baseUrl="${vizarce.api.baseUrl}" />
     </vizarce:config>
+
+    <!--
+        Basic Authentication (username/password/security token) — no Connected App
+        needed. Fine for demo/sandbox use; MuleSoft's own guidance is that OAuth is the
+        production-appropriate choice (see README "Salesforce Integration" section).
+    -->
+    <salesforce:sfdc-config name="Salesforce_Config">
+        <salesforce:basic-connection username="${salesforce.username}"
+                                      password="${salesforce.password}"
+                                      securityToken="${salesforce.securityToken}" />
+    </salesforce:sfdc-config>
 
 </mule>

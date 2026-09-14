@@ -46,6 +46,14 @@
 			<classifier>mule-plugin</classifier>
 		</dependency>
 
+		<!-- Salesforce — creates the VIZARCE_Song_Request__c Custom Object record -->
+		<dependency>
+			<groupId>com.mulesoft.connectors</groupId>
+			<artifactId>mule-salesforce-connector</artifactId>
+			<version>10.16.0</version>
+			<classifier>mule-plugin</classifier>
+		</dependency>
+
 		<!-- Testing -->
 		<dependency>
 			<groupId>com.mulesoft.munit</groupId>
