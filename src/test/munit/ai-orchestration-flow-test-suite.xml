@@ -1,0 +1,150 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mule xmlns:munit="http://www.mulesoft.org/schema/mule/munit"
+      xmlns:munit-tools="http://www.mulesoft.org/schema/mule/munit-tools"
+      xmlns:os="http://www.mulesoft.org/schema/mule/os"
+      xmlns:http="http://www.mulesoft.org/schema/mule/http"
+      xmlns="http://www.mulesoft.org/schema/mule/core"
+      xmlns:ee="http://www.mulesoft.org/schema/mule/ee/core"
+      xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+      xsi:schemaLocation="
+        http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+        http://www.mulesoft.org/schema/mule/munit http://www.mulesoft.org/schema/mule/munit/current/mule-munit.xsd
+        http://www.mulesoft.org/schema/mule/munit-tools http://www.mulesoft.org/schema/mule/munit-tools/current/mule-munit-tools.xsd
+        http://www.mulesoft.org/schema/mule/os http://www.mulesoft.org/schema/mule/os/current/mule-os.xsd
+        http://www.mulesoft.org/schema/mule/http http://www.mulesoft.org/schema/mule/http/current/mule-http.xsd
+        http://www.mulesoft.org/schema/mule/ee/core http://www.mulesoft.org/schema/mule/ee/core/current/mule-ee.xsd">
+
+    <munit:config name="ai-orchestration-flow-test-suite.xml" />
+
+    <!-- ==================================================================================
+         CIRCUIT BREAKER SUB-FLOW TESTS
+         Each test clears the Object Store first (MUnit tests should not depend on
+         execution order or leftover state from a previous test run).
+         ================================================================================== -->
+
+    <munit:before-each>
+        <try>
+            <os:clear objectStore="circuitBreakerStore" />
+            <error-handler>
+                <on-error-continue type="ANY" />
+            </error-handler>
+        </try>
+    </munit:before-each>
+
+    <munit:test name="check-circuit-breaker-is-closed-when-store-is-empty"
+                 description="With no cb-opened-at key present, the breaker must report closed (not open).">
+        <munit:execution>
+            <flow-ref name="check-circuit-breaker" />
+        </munit:execution>
+        <munit:validation>
+            <munit-tools:assert-that expression="#[vars.circuitBreakerOpen]"
+                                      is="#[MunitTools::equalTo(false)]" />
+        </munit:validation>
+    </munit:test>
+
+    <munit:test name="check-circuit-breaker-is-open-within-cooldown-window"
+                 description="A cb-opened-at timestamp from just now must report the breaker as open.">
+        <munit:execution>
+            <os:store key="cb-opened-at" objectStore="circuitBreakerStore">
+                <os:value>#[now() as Number {unit: 'milliseconds'}]</os:value>
+            </os:store>
+            <flow-ref name="check-circuit-breaker" />
+        </munit:execution>
+        <munit:validation>
+            <munit-tools:assert-that expression="#[vars.circuitBreakerOpen]"
+                                      is="#[MunitTools::equalTo(true)]" />
+        </munit:validation>
+    </munit:test>
+
+    <munit:test name="check-circuit-breaker-is-closed-after-cooldown-elapses"
+                 description="A cb-opened-at timestamp from 40s ago (past the 30s cooldown) must allow a half-open trial (reported closed).">
+        <munit:execution>
+            <os:store key="cb-opened-at" objectStore="circuitBreakerStore">
+                <os:value>#[(now() as Number {unit: 'milliseconds'}) - 40000]</os:value>
+            </os:store>
+            <flow-ref name="check-circuit-breaker" />
+        </munit:execution>
+        <munit:validation>
+            <munit-tools:assert-that expression="#[vars.circuitBreakerOpen]"
+                                      is="#[MunitTools::equalTo(false)]" />
+        </munit:validation>
+    </munit:test>
+
+    <munit:test name="record-circuit-failure-trips-breaker-on-third-consecutive-failure"
+                 description="Three calls to record-circuit-failure must result in cb-opened-at being set.">
+        <munit:execution>
+            <flow-ref name="record-circuit-failure" />
+            <flow-ref name="record-circuit-failure" />
+            <flow-ref name="record-circuit-failure" />
+            <os:contains key="cb-opened-at" objectStore="circuitBreakerStore" target="breakerTripped" />
+        </munit:execution>
+        <munit:validation>
+            <munit-tools:assert-that expression="#[vars.breakerTripped]"
+                                      is="#[MunitTools::equalTo(true)]" />
+        </munit:validation>
+    </munit:test>
+
+    <munit:test name="record-circuit-failure-does-not-trip-breaker-on-first-failure"
+                 description="A single failure must not open the breaker — threshold is 3.">
+        <munit:execution>
+            <flow-ref name="record-circuit-failure" />
+            <os:contains key="cb-opened-at" objectStore="circuitBreakerStore" target="breakerTripped" />
+        </munit:execution>
+        <munit:validation>
+            <munit-tools:assert-that expression="#[vars.breakerTripped]"
+                                      is="#[MunitTools::equalTo(false)]" />
+        </munit:validation>
+    </munit:test>
+
+    <munit:test name="record-circuit-success-clears-both-store-keys"
+                 description="A success must clear cb-failure-count and cb-opened-at, fully resetting the breaker.">
+        <munit:execution>
+            <flow-ref name="record-circuit-failure" />
+            <flow-ref name="record-circuit-failure" />
+            <flow-ref name="record-circuit-failure" />
+            <flow-ref name="record-circuit-success" />
+            <os:contains key="cb-opened-at" objectStore="circuitBreakerStore" target="openedAtExists" />
+            <os:contains key="cb-failure-count" objectStore="circuitBreakerStore" target="failureCountExists" />
+        </munit:execution>
+        <munit:validation>
+            <munit-tools:assert-that expression="#[vars.openedAtExists]"
+                                      is="#[MunitTools::equalTo(false)]" />
+            <munit-tools:assert-that expression="#[vars.failureCountExists]"
+                                      is="#[MunitTools::equalTo(false)]" />
+        </munit:validation>
+    </munit:test>
+
+    <!-- ==================================================================================
+         MAIN FLOW — happy-path test with the VIZARCE connector operations mocked out,
+         so this suite never makes a real network call.
+         ================================================================================== -->
+
+    <munit:test name="orchestrate-returns-success-payload-with-mocked-vizarce-calls"
+                 description="With composeSong and buildArtistDNA mocked, the main flow should return status SUCCESS with the enterprise-shaped payload.">
+        <munit:behavior>
+            <munit-tools:mock-when processor="vizarce:compose-song">
+                <munit-tools:then-return>
+                    <munit-tools:payload value='#[{ lyricsPrompt: "[Intro]\n...", stylePrompt: "cinematic future house", lyricsPromptLength: 42, stylePromptLength: 20, lyricsOverLimit: false, styleOverLimit: false }]' mediaType="application/java" />
+                </munit-tools:then-return>
+            </munit-tools:mock-when>
+            <munit-tools:mock-when processor="vizarce:build-artist-dna">
+                <munit-tools:then-return>
+                    <munit-tools:payload value='#[null]' mediaType="application/java" />
+                </munit-tools:then-return>
+            </munit-tools:mock-when>
+        </munit:behavior>
+        <munit:execution>
+            <set-payload value='#[%dw 2.0
+output application/json
+---
+{ concept: "a song about gravity", genreTag: "future-house", bpm: "112", musicalKey: "A minor" }]' />
+            <flow-ref name="ai-orchestration-main" />
+        </munit:execution>
+        <munit:validation>
+            <munit-tools:assert-that expression="#[payload.status]" is="#[MunitTools::equalTo('SUCCESS')]" />
+            <munit-tools:assert-that expression="#[payload.VIZARCE_Song_Request__c.Genre__c]"
+                                      is="#[MunitTools::equalTo('future-house')]" />
+        </munit:validation>
+    </munit:test>
+
+</mule>

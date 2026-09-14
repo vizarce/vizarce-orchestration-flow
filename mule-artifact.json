@@ -1,0 +1,15 @@
+{
+    "configs": [
+        "global-config.xml",
+        "ai-orchestration-flow.xml"
+    ],
+    "classLoaderModelLoaderDescriptor": {
+        "attributes": {
+            "exportedPackages": [],
+            "exportedResources": []
+        },
+        "id": "mule"
+    },
+    "minMuleVersion": "4.9.0",
+    "javaSpecificationVersions": ["17"]
+}

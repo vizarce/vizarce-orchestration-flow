@@ -1,0 +1,272 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mule xmlns="http://www.mulesoft.org/schema/mule/core"
+      xmlns:http="http://www.mulesoft.org/schema/mule/http"
+      xmlns:os="http://www.mulesoft.org/schema/mule/os"
+      xmlns:vizarce="http://www.mulesoft.org/schema/mule/vizarce"
+      xmlns:ee="http://www.mulesoft.org/schema/mule/ee/core"
+      xmlns:doc="http://www.mulesoft.org/schema/mule/documentation"
+      xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+      xsi:schemaLocation="
+        http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+        http://www.mulesoft.org/schema/mule/http http://www.mulesoft.org/schema/mule/http/current/mule-http.xsd
+        http://www.mulesoft.org/schema/mule/os http://www.mulesoft.org/schema/mule/os/current/mule-os.xsd
+        http://www.mulesoft.org/schema/mule/vizarce http://www.mulesoft.org/schema/mule/vizarce/current/mule-vizarce.xsd
+        http://www.mulesoft.org/schema/mule/ee/core http://www.mulesoft.org/schema/mule/ee/core/current/mule-ee.xsd">
+
+    <!-- ================================================================================
+         MAIN FLOW
+         POST /orchestrate — accepts a song request, orchestrates VIZARCE's AI generation
+         behind a Circuit Breaker, and produces a Salesforce-Custom-Object-shaped payload
+         ready to hand to a real salesforce:create operation (not wired up here — no
+         Salesforce credentials available in this environment; see the comment near the
+         end of this flow for exactly where that operation would plug in).
+         ================================================================================ -->
+    <flow name="ai-orchestration-main">
+        <http:listener config-ref="httpListenerConfig" path="/orchestrate" allowedMethods="POST">
+            <http:response statusCode="#[vars.httpStatus default 200]" />
+        </http:listener>
+
+        <ee:transform doc:name="Parse request into flow variables">
+            <ee:variables>
+                <ee:set-variable variableName="concept"><![CDATA[%dw 2.0
+output application/java
+---
+payload.concept]]></ee:set-variable>
+                <ee:set-variable variableName="genreTag"><![CDATA[%dw 2.0
+output application/java
+---
+payload.genreTag]]></ee:set-variable>
+                <ee:set-variable variableName="bpm"><![CDATA[%dw 2.0
+output application/java
+---
+payload.bpm]]></ee:set-variable>
+                <ee:set-variable variableName="musicalKey"><![CDATA[%dw 2.0
+output application/java
+---
+payload.musicalKey]]></ee:set-variable>
+                <ee:set-variable variableName="artistName"><![CDATA[%dw 2.0
+output application/java
+---
+payload.artistName default null]]></ee:set-variable>
+            </ee:variables>
+        </ee:transform>
+
+        <flow-ref name="check-circuit-breaker" />
+
+        <choice>
+            <!-- ============================ CIRCUIT OPEN — fail fast, no VIZARCE call ============================ -->
+            <when expression="#[vars.circuitBreakerOpen]">
+                <logger level="WARN"
+                        message="Circuit breaker OPEN — skipping VIZARCE call and returning fallback immediately." />
+                <ee:transform doc:name="Fallback response">
+                    <ee:message>
+                        <ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+{
+    status: "CIRCUIT_OPEN",
+    message: "VIZARCE API is temporarily unavailable (circuit breaker open after repeated connectivity failures). Try again shortly."
+}]]></ee:set-payload>
+                    </ee:message>
+                    <ee:variables>
+                        <ee:set-variable variableName="httpStatus"><![CDATA[%dw 2.0
+output application/java
+---
+503]]></ee:set-variable>
+                    </ee:variables>
+                </ee:transform>
+            </when>
+
+            <!-- ============================ CIRCUIT CLOSED (or half-open trial) — proceed ============================ -->
+            <otherwise>
+                <try doc:name="Orchestrate VIZARCE call, tracking circuit-breaker state on success/failure">
+                    <!-- ==== SCATTER-GATHER: parallel, independent VIZARCE calls ==== -->
+                    <scatter-gather doc:name="Compose song (route 0) + Artist DNA if requested (route 1), in parallel">
+                        <route>
+                            <!--
+                                UNTIL SUCCESSFUL: retries the compose call on transient failure.
+                                Known limitation, documented honestly rather than glossed over:
+                                Mule 4's <until-successful> retries on ANY unhandled error inside
+                                its scope — it has no built-in way to retry ONLY on
+                                VIZARCE:RATE_LIMITED while failing fast on VIZARCE:CONNECTIVITY /
+                                VIZARCE:API_ERROR / VIZARCE:INVALID_RESPONSE. The standard
+                                workaround (a hand-rolled retry sub-flow using a recursive
+                                flow-ref + an explicit <choice> on error.errorType, with its own
+                                attempt counter) gives per-error-type control that
+                                <until-successful> structurally cannot — noted as a follow-up
+                                refinement in the README rather than implemented here, to keep
+                                this flow readable as a first version.
+                            -->
+                            <until-successful maxRetries="3" millisBetweenRetries="2000">
+                                <vizarce:compose-song config-ref="Vizarce_Config"
+                                                       concept="#[vars.concept]"
+                                                       genreTag="#[vars.genreTag]"
+                                                       bpm="#[vars.bpm]"
+                                                       musicalKey="#[vars.musicalKey]"
+                                                       timeoutSeconds="300" />
+                            </until-successful>
+                        </route>
+                        <route>
+                            <choice>
+                                <when expression="#[vars.artistName != null]">
+                                    <vizarce:build-artist-dna config-ref="Vizarce_Config"
+                                                                 artistName="#[vars.artistName]"
+                                                                 timeoutSeconds="30" />
+                                </when>
+                                <otherwise>
+                                    <!--
+                                        No artist reference given — this route still needs to
+                                        produce a message so Scatter-Gather's aggregation doesn't
+                                        wait on/fault over a route that never ran the real operation.
+                                    -->
+                                    <set-payload value="#[null]" />
+                                </otherwise>
+                            </choice>
+                        </route>
+                    </scatter-gather>
+
+                    <flow-ref name="record-circuit-success" />
+
+                    <!-- ==== DataWeave transform to an enterprise (Salesforce Custom Object) schema ==== -->
+                    <ee:transform doc:name="Transform to VIZARCE_Song_Request__c shape">
+                        <ee:message>
+                            <ee:set-payload><![CDATA[%dw 2.0
+output application/json
+var composeResult = payload."0".payload
+var artistDnaResult = payload."1".payload
+---
+{
+    status: "SUCCESS",
+    VIZARCE_Song_Request__c: {
+        Concept__c: vars.concept,
+        Genre__c: vars.genreTag,
+        BPM__c: vars.bpm as Number default 0,
+        Musical_Key__c: vars.musicalKey,
+        Lyrics_Prompt__c: composeResult.lyricsPrompt,
+        Style_Prompt__c: composeResult.stylePrompt,
+        Lyrics_Over_Limit__c: composeResult.lyricsOverLimit,
+        Style_Over_Limit__c: composeResult.styleOverLimit,
+        Artist_DNA_Vocal__c: artistDnaResult.vocal default null,
+        Artist_DNA_Sound__c: artistDnaResult.sound default null,
+        Requested_At__c: now() as String {format: "yyyy-MM-dd'T'HH:mm:ss'Z'"}
+    }
+}]]></ee:set-payload>
+                        </ee:message>
+                        <ee:variables>
+                            <ee:set-variable variableName="httpStatus"><![CDATA[%dw 2.0
+output application/java
+---
+200]]></ee:set-variable>
+                        </ee:variables>
+                    </ee:transform>
+
+                    <logger level="INFO" message="#[payload]" doc:name="Log the enterprise-shaped payload" />
+
+                    <!--
+                        Where a real integration would continue:
+                        <salesforce:create config-ref="Salesforce_Config" type="VIZARCE_Song_Request__c">
+                            <salesforce:records>#[[payload.VIZARCE_Song_Request__c]]</salesforce:records>
+                        </salesforce:create>
+                        Not wired up — no Salesforce credentials available in this environment.
+                        The payload above is already shaped exactly for that operation's input.
+                    -->
+
+                    <error-handler>
+                        <on-error-continue type="ANY">
+                            <flow-ref name="record-circuit-failure" />
+                            <logger level="ERROR"
+                                    message="#['VIZARCE orchestration failed: ' ++ (error.description default error.detailedDescription default 'unknown error')]" />
+                            <ee:transform doc:name="Error response">
+                                <ee:message>
+                                    <ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+{
+    status: "FAILED",
+    errorType: (error.errorType.identifier default "UNKNOWN"),
+    message: (error.description default "VIZARCE orchestration failed.")
+}]]></ee:set-payload>
+                                </ee:message>
+                                <ee:variables>
+                                    <ee:set-variable variableName="httpStatus"><![CDATA[%dw 2.0
+output application/java
+---
+502]]></ee:set-variable>
+                                </ee:variables>
+                            </ee:transform>
+                        </on-error-continue>
+                    </error-handler>
+                </try>
+            </otherwise>
+        </choice>
+    </flow>
+
+
+    <!-- ================================================================================
+         CIRCUIT BREAKER SUB-FLOWS
+         State model: two Object Store keys.
+           cb-failure-count (Number) — consecutive failures since the last success.
+           cb-opened-at     (Number, epoch millis) — present only while the breaker is OPEN.
+         Threshold: 3 consecutive failures trips the breaker.
+         Cooldown:  30 seconds after tripping, the breaker allows one trial request through
+                    (a "half-open" attempt) without explicitly resetting cb-opened-at — a
+                    success on that trial clears both keys via record-circuit-success; a
+                    failure re-trips it via record-circuit-failure, extending the cooldown.
+         ================================================================================ -->
+
+    <sub-flow name="check-circuit-breaker">
+        <os:contains key="cb-opened-at" objectStore="circuitBreakerStore" target="cbOpenedExists" />
+        <choice>
+            <when expression="#[vars.cbOpenedExists]">
+                <os:retrieve key="cb-opened-at" objectStore="circuitBreakerStore" target="cbOpenedAt" />
+                <set-variable variableName="circuitBreakerOpen"
+                              value="#[((now() as Number {unit: 'milliseconds'}) - vars.cbOpenedAt) &lt; 30000]" />
+            </when>
+            <otherwise>
+                <set-variable variableName="circuitBreakerOpen" value="#[false]" />
+            </otherwise>
+        </choice>
+    </sub-flow>
+
+    <sub-flow name="record-circuit-failure">
+        <os:contains key="cb-failure-count" objectStore="circuitBreakerStore" target="cbCountExists" />
+        <choice>
+            <when expression="#[vars.cbCountExists]">
+                <os:retrieve key="cb-failure-count" objectStore="circuitBreakerStore" target="cbFailureCount" />
+            </when>
+            <otherwise>
+                <set-variable variableName="cbFailureCount" value="#[0]" />
+            </otherwise>
+        </choice>
+        <set-variable variableName="cbNewFailureCount" value="#[vars.cbFailureCount + 1]" />
+        <os:store key="cb-failure-count" objectStore="circuitBreakerStore">
+            <os:value>#[vars.cbNewFailureCount]</os:value>
+        </os:store>
+        <choice>
+            <when expression="#[vars.cbNewFailureCount >= 3]">
+                <logger level="WARN"
+                        message="#['Circuit breaker tripping OPEN after ' ++ (vars.cbNewFailureCount as String) ++ ' consecutive failures.']" />
+                <os:store key="cb-opened-at" objectStore="circuitBreakerStore">
+                    <os:value>#[now() as Number {unit: 'milliseconds'}]</os:value>
+                </os:store>
+            </when>
+        </choice>
+    </sub-flow>
+
+    <sub-flow name="record-circuit-success">
+        <os:contains key="cb-failure-count" objectStore="circuitBreakerStore" target="cbCountExists" />
+        <choice>
+            <when expression="#[vars.cbCountExists]">
+                <os:remove key="cb-failure-count" objectStore="circuitBreakerStore" />
+            </when>
+        </choice>
+        <os:contains key="cb-opened-at" objectStore="circuitBreakerStore" target="cbOpenedExists" />
+        <choice>
+            <when expression="#[vars.cbOpenedExists]">
+                <os:remove key="cb-opened-at" objectStore="circuitBreakerStore" />
+                <logger level="INFO" message="Circuit breaker CLOSED again after a successful call." />
+            </when>
+        </choice>
+    </sub-flow>
+
+</mule>

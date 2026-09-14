@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mule xmlns="http://www.mulesoft.org/schema/mule/core"
+      xmlns:http="http://www.mulesoft.org/schema/mule/http"
+      xmlns:os="http://www.mulesoft.org/schema/mule/os"
+      xmlns:vizarce="http://www.mulesoft.org/schema/mule/vizarce"
+      xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+      xsi:schemaLocation="
+        http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+        http://www.mulesoft.org/schema/mule/http http://www.mulesoft.org/schema/mule/http/current/mule-http.xsd
+        http://www.mulesoft.org/schema/mule/os http://www.mulesoft.org/schema/mule/os/current/mule-os.xsd
+        http://www.mulesoft.org/schema/mule/vizarce http://www.mulesoft.org/schema/mule/vizarce/current/mule-vizarce.xsd">
+
+    <!--
+        API key is read from a system property (-M-Dvizarce.api.key=... at runtime, or via
+        Anypoint's Secure Configuration Properties in a real deployment) — never hardcoded.
+        See src/main/resources/local.properties for the local-dev placeholder.
+    -->
+    <configuration-properties file="local.properties" />
+
+    <http:listener-config name="httpListenerConfig">
+        <http:listener-connection host="0.0.0.0" port="8081" />
+    </http:listener-config>
+
+    <!--
+        Backs the Circuit Breaker's open/closed state (cb-failure-count, cb-opened-at).
+        In-memory here for local dev; swap to a persistent Object Store implementation
+        for a multi-worker CloudHub deployment so breaker state is shared across workers.
+    -->
+    <os:object-store name="circuitBreakerStore"
+                      persistent="false"
+                      maxEntries="100"
+                      entryTtl="1"
+                      entryTtlUnit="HOURS" />
+
+    <vizarce:config name="Vizarce_Config">
+        <vizarce:connection apiKey="${vizarce.api.key}" baseUrl="${vizarce.api.baseUrl}" />
+    </vizarce:config>
+
+</mule>
