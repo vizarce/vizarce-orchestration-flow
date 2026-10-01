@@ -22,15 +22,15 @@
          execution order or leftover state from a previous test run).
          ================================================================================== -->
 
-    <munit:before-each>
+    <munit:before-test name="reset-circuit-breaker-store" description="Clear circuitBreakerStore before each test.">
         <try>
             <os:clear objectStore="circuitBreakerStore" />
             <error-handler>
                 <on-error-continue type="ANY" />
             </error-handler>
         </try>
-    </munit:before-each>
-
+    </munit:before-test>
+    
     <munit:test name="check-circuit-breaker-is-closed-when-store-is-empty"
                  description="With no cb-opened-at key present, the breaker must report closed (not open).">
         <munit:execution>
@@ -119,7 +119,7 @@
          so this suite never makes a real network call.
          ================================================================================== -->
 
-    <munit:test name="orchestrate-returns-success-payload-with-mocked-vizarce-calls"
+        <munit:test name="orchestrate-returns-success-payload-with-mocked-vizarce-calls"
                  description="With composeSong and buildArtistDNA mocked, the main flow should return status SUCCESS with the enterprise-shaped payload.">
         <munit:behavior>
             <munit-tools:mock-when processor="vizarce:compose-song">
@@ -130,6 +130,11 @@
             <munit-tools:mock-when processor="vizarce:build-artist-dna">
                 <munit-tools:then-return>
                     <munit-tools:payload value='#[null]' mediaType="application/java" />
+                </munit-tools:then-return>
+            </munit-tools:mock-when>
+            <munit-tools:mock-when processor="salesforce:create">
+                <munit-tools:then-return>
+                    <munit-tools:payload value='#[{ items: [{ id: "a00000000000001AAA", success: true, errors: [] }] }]' mediaType="application/java" />
                 </munit-tools:then-return>
             </munit-tools:mock-when>
         </munit:behavior>
