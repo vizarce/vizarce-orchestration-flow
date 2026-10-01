@@ -260,7 +260,7 @@ output application/java
                 <set-variable variableName="cbFailureCount" value="#[0]" />
             </otherwise>
         </choice>
-        <set-variable variableName="cbNewFailureCount" value="#[vars.cbFailureCount + 1]" />
+        <set-variable variableName="cbNewFailureCount" value="#[vars.cbFailureCount as Number + 1]" />
         <os:store key="cb-failure-count" objectStore="circuitBreakerStore">
             <os:value>#[vars.cbNewFailureCount]</os:value>
         </os:store>
