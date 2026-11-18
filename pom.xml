@@ -24,7 +24,7 @@
 	<dependencies>
 		<!-- The connector built earlier in this session -->
 		<dependency>
-			<groupId>com.vizarce</groupId>
+			<groupId>43c5563d-f5fb-4a13-93dc-c496b9324c8a</groupId>
 			<artifactId>vizarce-connector</artifactId>
 			<version>1.1.2</version>
 			<classifier>mule-plugin</classifier>
