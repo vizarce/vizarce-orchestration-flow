@@ -46,7 +46,7 @@
     <salesforce:sfdc-config name="Salesforce_Config">
         <salesforce:basic-connection username="${salesforce.username}"
                                       password="${salesforce.password}"
-                                      securityToken="${salesforce.securityToken}" />
+                                      securityToken="${salesforce.securityToken}" url="https://login.salesforce.com/services/Soap/u/67.0"/>
     </salesforce:sfdc-config>
 
 </mule>
